@@ -23,7 +23,6 @@
 @property (nonatomic,strong,readwrite) UIViewController *afterController;
 
 - (void)initializeChildControllers;
-- (void)didPage;
 
 @end
 
@@ -115,6 +114,106 @@
   self.rotating = NO;
 }
 
+///////////////////////////////////////////////////////////////////////////////////////////////////
+- (void)reset {
+  self.initialized = NO;
+  if (self.viewController) {
+    [self.viewController willMoveToParentViewController:nil];
+    [self.viewController.view removeFromSuperview];
+    [self.viewController removeFromParentViewController];
+    self.viewController = nil;
+  }
+  if (self.beforeController) {
+    [self.beforeController willMoveToParentViewController:nil];
+    [self.beforeController.view removeFromSuperview];
+    [self.beforeController removeFromParentViewController];
+    self.beforeController = nil;
+  }
+  if (self.afterController) {
+    [self.afterController willMoveToParentViewController:nil];
+    [self.afterController.view removeFromSuperview];
+    [self.afterController removeFromParentViewController];
+    self.afterController = nil;
+  }
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+- (void)jumpToViewController:(UIViewController*)viewController {
+  
+  if ((viewController != self.viewController) && (viewController != nil)) {
+    UIViewController *previousViewController = self.viewController;
+    
+    self.viewController = viewController;
+    
+    // If the pageViewController has already been initialized, then redo it.
+    if (self.isViewLoaded) {
+      
+      self.initialized = NO;
+      
+      if (self.viewController) {
+        CGRect bounds = self.view.bounds;
+        bounds.origin.x = bounds.size.width;
+        
+        [self.viewController willMoveToParentViewController:self];
+        [self addChildViewController:self.viewController];
+        self.viewController.view.frame = bounds;
+        [self.scrollView addSubview:self.viewController.view];
+        [self.viewController didMoveToParentViewController:self];
+        
+        self.leftInset  = 0.f;
+        self.rightInset = 0.f;
+        self.scrollView.contentInset = UIEdgeInsetsMake(0.f, self.leftInset, 0.f, self.rightInset);
+        self.scrollView.contentOffset = CGPointMake(bounds.size.width, 0.f);
+      }
+      
+      // remove child view controllers - excluding this one
+      for (UIViewController *controller in self.childViewControllers) {
+        if (controller != self.viewController) {
+          [controller willMoveToParentViewController:nil];
+          [controller.view removeFromSuperview];
+          [controller removeFromParentViewController];
+        }
+      }
+      
+      // re-initialize the child controllers
+      [self initializeChildControllers];
+    }
+    
+    // notify delegate
+    if (self.delegate && [self.delegate respondsToSelector:@selector(mn_pageViewController:didPageToViewController:)]) {
+      [self.delegate mn_pageViewController:self didPageToViewController:self.viewController];
+    }
+    if (self.delegate && [self.delegate respondsToSelector:@selector(mn_pageViewController:didPageFromViewController:)]) {
+      [self.delegate mn_pageViewController:self didPageFromViewController:previousViewController];
+    }
+  }
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+- (void)scrollToNextViewController:(BOOL)animated {
+  if (self.afterController != nil) {
+    // Be sure to re-enable scrolling before doing this
+    self.scrollView.scrollEnabled = YES;
+    
+    CGPoint newOffset = self.scrollView.contentOffset;
+    newOffset.x = self.afterController.view.frame.origin.x;
+    [self.scrollView setContentOffset:newOffset animated:animated];
+  }
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+- (void)scrollToPreviousViewController:(BOOL)animated {
+  if (self.beforeController != nil) {
+    // Be sure to re-enable scrolling before doing this
+    self.scrollView.scrollEnabled = YES;
+    
+    CGPoint newOffset = self.scrollView.contentOffset;
+    newOffset.x = self.beforeController.view.frame.origin.x;
+    [self.scrollView setContentOffset:newOffset animated:animated];
+  }
+}
+
+
 #pragma mark - Private
 
 - (void)initializeChildControllers {
@@ -157,20 +256,16 @@
   self.initialized = YES;
 }
 
-- (void)didPage {
-  UIViewController *visibleController = nil;
-  for (UIViewController *controller in self.childViewControllers) {
-    CGPoint point = [self.scrollView convertPoint:controller.view.frame.origin toView:self.view];
-    
-    if (point.x == 0.f) {
-      visibleController = controller;
-    }
-  }
-  
+// JM: replaced the didPage method because the logic was broken and also it's useful to get the 'from' controller.
+- (void)didPageTo:(UIViewController*)toController from:(UIViewController*)fromController {
   if (self.delegate && [self.delegate respondsToSelector:@selector(mn_pageViewController:didPageToViewController:)]) {
-    [self.delegate mn_pageViewController:self didPageToViewController:visibleController];
+    [self.delegate mn_pageViewController:self didPageToViewController:toController];
+  }
+  if (self.delegate && [self.delegate respondsToSelector:@selector(mn_pageViewController:didPageFromViewController:)]) {
+    [self.delegate mn_pageViewController:self didPageFromViewController:fromController];
   }
 }
+
 
 #pragma mark - UIScrollViewDelegate
 
@@ -230,9 +325,40 @@
   }
 }
 
+// JM: If you drag the scrollView exactly to the page, so it doesn't need to bounce to its resting
+// position, then scrollViewDidEndDecelerating: won't get called and didPage won't get called if
+// you end on the view that you started with. In that case the delegate won't get a final callback
+// to say that the scroller reached its final position.
+- (void)scrollViewDidEndDragging:(UIScrollView *)scrollView willDecelerate:(BOOL)decelerate {
+  if (self.isRotating) {
+    return;
+  }
+  
+  // (this case will be handled by scrollViewDidEndDecelerating:)
+  if (decelerate) {
+    return;
+  }
+
+  CGRect bounds = self.scrollView.bounds;
+  CGFloat ratio = fabs((scrollView.contentOffset.x - bounds.size.width) / bounds.size.width);
+  
+  for (UIViewController *controller in self.childViewControllers) {
+    if (controller == self.viewController) {
+      if (self.delegate && [self.delegate respondsToSelector:@selector(mn_pageViewController:willPageToViewController:withRatio:)]) {
+        [self.delegate mn_pageViewController:self willPageToViewController:controller withRatio:MIN(ratio, 1.f)];
+      }
+    } else {
+      if (self.delegate && [self.delegate respondsToSelector:@selector(mn_pageViewController:willPageFromViewController:withRatio:)]) {
+        [self.delegate mn_pageViewController:self willPageFromViewController:self.viewController withRatio:MAX(1.f - ratio, 0.f)];
+      }
+    }
+  }
+}
+
 #pragma mark - MNQueuingScrollViewDelegate
 
 - (void)queuingScrollViewDidPageForward:(UIScrollView *)scrollView {
+  UIViewController *previousViewController = self.viewController;
   UIViewController *nextViewController = nil;
 
   CGRect frame;
@@ -281,10 +407,11 @@
     self.scrollView.contentInset = UIEdgeInsetsMake(0.f, self.leftInset, 0.f, self.rightInset);
   }
 
-  [self didPage];
+  [self didPageTo:nextViewController from:previousViewController];
 }
 
 - (void)queuingScrollViewDidPageBackward:(UIScrollView *)scrollView {
+  UIViewController *previousViewController = self.viewController;
   UIViewController *nextViewController = nil;
   
   CGRect frame;
@@ -330,7 +457,7 @@
     self.scrollView.contentInset = UIEdgeInsetsMake(0.f, self.leftInset, 0.f, self.rightInset);
   }
 
-  [self didPage];
+  [self didPageTo:nextViewController from:previousViewController];
 }
 
 @end
